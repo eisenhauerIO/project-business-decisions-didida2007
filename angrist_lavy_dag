@@ -1,0 +1,21 @@
+// Angrist & Lavy (1999) Causal DAG
+digraph {
+	node [fontname=Arial shape=rectangle]
+	V [label="Enrollment (V)
+(Running Variable)"]
+	Z [label="Maimonides Rule (Z)
+(Instrument: f_sc)"]
+	D [label="Actual Class Size (D)
+(Treatment)"]
+	Y [label="Test Scores (Y)
+(Outcome)"]
+	U [label="Unobserved Factors (U)
+(e.g., Socioeconomic Status)" fillcolor=lightgrey style=filled]
+	V -> Z [label=" Rule Definition"]
+	V -> D [label=" Smooth Trend"]
+	Z -> D [label=" First Stage"]
+	D -> Y [label=" Causal Effect (α)"]
+	U -> V [label=" Sorting/Density"]
+	U -> Y [label=" Direct Score Effect"]
+	V -> Y [label=" Smooth Trend" style=dashed]
+}
