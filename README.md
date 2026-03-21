@@ -2,10 +2,40 @@
 [![Run Notebook](https://github.com/eisenhauerIO/projects-businss-decisions/actions/workflows/run-notebook.yml/badge.svg)](https://github.com/eisenhauerIO/projects-businss-decisions/actions/workflows/run-notebook.yml)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
-## Project Example
+### Replication project
+Bruce Zhou, ECON 481, Spring 2026
 
-The notebook project.ipynb contains an example project by [Annica Gehlen](https://github.com/amageh) from the 2019 iteration of the [OSE data science](https://github.com/OpenSourceEconomics/ose-course-data-science) class at Bonn University. It replicates the results from the following paper:
+---
 
-* Lindo, J. M., Sanders, N. J., & Oreopoulos, P. (2010). [Ability, Gender, and Performance Standards: Evidence from Academic Probation](https://www.aeaweb.org/articles?id=10.1257/app.2.2.95). *American Economic Journal: Applied Economics*, 2(2), 95-117.
+[replication_project.ipynb](replication_project.ipynb) is a replication of the following paper:
 
-Lindo et al. (2010) examine the effects of academic probation on student outcomes using a regression discontinuity design. The analysis is based on data from a large Canadian university and evaluates whether academic probation is successful in improving the performance of low scoring students. Consistent with a model of performance standards, the authors find that being placed on probation in the first year of university induces some students to drop out of school while it improves the grades of students who continue their studies. In a more general sense, academic probation can offer insights into how agents respond to negative incentives and the threat of punishment in a real-world context.
+Angrist, J. D., & Lavy, V. (1999). [Using Maimonides' rule to estimate the effect of class size on scholastic achievement](https://academic.oup.com/qje/article-abstract/114/2/533/1844228). *The Quarterly Journal of Economics*, 114(2), 533–575.
+
+#### Project Structure
+
+```
+project/
+├── auxiliary/
+│   └── dag.py                       # Create DAG graphs
+│   ├── dataframe_analysis.py        # Father class
+│   └── plots.py                     # Create plots
+│   └── tables.py                    # Create tables
+├── data/
+│   ├── final4.dta/                  # Data on 4th graders
+│   └── final5.dta/                  # Data on 5th graders
+├── paper/
+│   ├── AngristLavy1999.pdf          # The original article
+│   └── read_paper.py                # AI access to the article
+├── png
+│   ├── angrist_lavy_dag_no_z.png    # DAG with no IV
+│   └── angrist_lavy_dag.png         # DAG with IV
+└── replication_project.ipynb        # Main project
+```
+
+---
+
+#### Dependencies
+
+```bash
+pip install pandas numpy matplotlib statsmodels great_tables importlib
+```
