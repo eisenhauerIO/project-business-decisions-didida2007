@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyArrowPatch
 
@@ -116,18 +118,20 @@ def _plot_dag(include_z, save_path, show):
 
     plt.tight_layout(pad=1.0)
     if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        output_path = Path(save_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
     if show:
         plt.show()
 
     return fig, ax
 
 
-def plot_identification_dag(save_path="angrist_lavy_dag.png", show=True):
+def plot_identification_dag(save_path="pngs/angrist_lavy_dag.png", show=True):
     """Plot the full Angrist-Lavy identification DAG including the instrument node."""
     return _plot_dag(include_z=True, save_path=save_path, show=show)
 
 
-def plot_identification_dag_without_z(save_path="angrist_lavy_dag_no_z.png", show=True):
+def plot_identification_dag_without_z(save_path="pngs/angrist_lavy_dag_no_z.png", show=True):
     """Plot the identification DAG without the Maimonides rule node or its arrows."""
     return _plot_dag(include_z=False, save_path=save_path, show=show)

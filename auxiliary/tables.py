@@ -49,6 +49,43 @@ class TableGenerator(ProcessedData):
         """Format coefficient: trim leading zero (e.g., 0.123 → .123)."""
         return f"{value:.3f}".replace("0.", ".").replace("-0.", "-.")
 
+    def detrended_regression(self):
+        """Detrended binned regression matching Angrist & Lavy (1999) Figure III methodology.
+        
+        Procedure:
+        1. Detrend avgverb and predicted class size (fsc) against enrollment and PD index at class level
+        2. Bin detrended residuals by enrollment intervals (10-unit bins)
+        3. Compute mean residuals within each bin  
+        4. Regress bin-level y_residuals on bin-level f_residuals
+        
+        Returns:
+            tuple: (model, bin_data)
+                model: OLS regression object for slope and stderr
+                bin_data: DataFrame of bin-level residuals
+        """
+        df = self.df.copy()
+        df = df.dropna(subset=['avgverb', 'tipuach', 'c_size'])
+
+        # Predicted class size from Maimonides' rule (enrollment-based instrument)
+        df['fsc'] = self.maimonides_rule(df['c_size'])
+        
+        # Detrend both test scores and predicted class size against controls
+        # Controls: enrollment (c_size) and percent disadvantaged (tipuach)
+        controls = sm.add_constant(df[['c_size', 'tipuach']])
+        df['y_resid'] = sm.OLS(df['avgverb'], controls).fit().resid
+        df['f_resid'] = sm.OLS(df['fsc'], controls).fit().resid
+
+        # Bin classes by enrollment (0-10, 10-20, ..., 150-160, 160+ all labeled)
+        df['bin'] = self.enrollment_bins(df['c_size'])
+
+        # Aggregate to bin-level means
+        bin_data = df.groupby('bin', observed=False)[['y_resid', 'f_resid']].mean().dropna()
+
+        # Regression through origin (residuals already mean-centered from detrending)
+        model = sm.OLS(bin_data['y_resid'], bin_data['f_resid']).fit(cov_type='HC1')
+        
+        return model, bin_data
+
     @staticmethod
     def _fmt_se(value):
         """Format standard error with parentheses and leading zero trim."""
