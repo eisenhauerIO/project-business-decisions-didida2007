@@ -16,21 +16,69 @@ class TableGenerator(ProcessedData):
     PM3_QUERY = "(c_size >= 38 & c_size <= 43) | (c_size >= 78 & c_size <= 83) | (c_size >= 118 & c_size <= 123)"
 
     @staticmethod
-    def _piecewise_linear_trend(enrollment):
-        """Compute piecewise-linear trend for IV specification based on enrollment thresholds."""
+    def _maimonides_rule_threshold(enrollment, threshold=40):
+        """Generalized Maimonides rule with configurable threshold."""
+        return enrollment / (np.floor((enrollment - 1) / threshold) + 1)
+
+    @staticmethod
+    def _piecewise_linear_trend(enrollment, threshold=40):
+        """Continuous piecewise trend matching Maimonides-rule slopes for a threshold.
+
+        Segment j has slope 1/j on ((j-1)*threshold, j*threshold]. Intercepts are
+        chosen recursively so the trend is continuous at each breakpoint.
+        """
         e = pd.Series(enrollment, copy=False)
         trend = pd.Series(np.nan, index=e.index, dtype=float)
+        if e.empty:
+            return trend
 
-        m1 = (e >= 0) & (e <= 40)
-        m2 = (e >= 41) & (e <= 80)
-        m3 = (e >= 81) & (e <= 120)
-        m4 = (e >= 121) & (e <= 160)
+        max_e = int(np.nanmax(e.values))
+        n_segments = max(1, int(np.ceil(max_e / threshold)))
+        intercept = 0.0
 
-        trend.loc[m1] = e.loc[m1]
-        trend.loc[m2] = 20 + (e.loc[m2] / 2)
-        trend.loc[m3] = (100 / 3) + (e.loc[m3] / 3)
-        trend.loc[m4] = (130 / 3) + (e.loc[m4] / 4)
+        for j in range(1, n_segments + 1):
+            left = (j - 1) * threshold
+            right = j * threshold
+            if j == 1:
+                mask = (e >= 0) & (e <= right)
+            else:
+                mask = (e > left) & (e <= right)
+
+            trend.loc[mask] = intercept + (e.loc[mask] / j)
+
+            # Enforce continuity at the next breakpoint.
+            boundary_value = intercept + (right / j)
+            intercept = boundary_value - (right / (j + 1))
+
+        # Extend final segment linearly if any values exceed computed breakpoints.
+        over_mask = e > (n_segments * threshold)
+        if over_mask.any():
+            trend.loc[over_mask] = intercept + (e.loc[over_mask] / (n_segments + 1))
+
         return trend
+
+    @staticmethod
+    def _discontinuity_query_for_threshold(threshold=40, bandwidth=5, max_enrollment=190):
+        """Build +/- bandwidth discontinuity windows for multiples of threshold.
+
+        Keeps the original Angrist-Lavy windows for threshold=40 for full backward
+        compatibility with the existing replication tables.
+        """
+        if threshold == 40 and bandwidth == 5 and max_enrollment == 190:
+            return TableGenerator.DISC_QUERY
+
+        windows = []
+        cutoff = threshold
+        while cutoff - (bandwidth - 1) <= max_enrollment:
+            lo = cutoff - (bandwidth - 1)
+            hi = cutoff + bandwidth
+            if hi > max_enrollment:
+                hi = max_enrollment
+            if lo <= hi:
+                windows.append(f"(c_size >= {lo} & c_size <= {hi})")
+            cutoff += threshold
+
+        return " | ".join(windows)
 
     def __init__(self, df):
         """Initialize with columns and row labels for descriptive tables."""
@@ -406,12 +454,13 @@ class TableGenerator(ProcessedData):
 
     # ========== 2SLS Table ==========
 
-    def _prep_iv_df(self, df):
-        """Prepare IV dataframe: add squared enrollment and segment/trend variables."""
+    def _prep_iv_df(self, df, threshold=40):
+        """Prepare IV dataframe for a given threshold: instrument and trend controls."""
         df = df.copy()
+        df['p_size'] = self._maimonides_rule_threshold(df['c_size'], threshold)
         df['c_size_sq100'] = df['c_size'] ** 2 / 100
-        df['seg'] = np.floor((df['c_size'] - 1) / 40).astype(int)
-        df['plin'] = self._piecewise_linear_trend(df['c_size'])
+        df['seg'] = np.floor((df['c_size'] - 1) / threshold).astype(int)
+        df['plin'] = self._piecewise_linear_trend(df['c_size'], threshold)
         return df
 
     def _run_iv(self, df, outcome, exog_vars):
@@ -430,10 +479,11 @@ class TableGenerator(ProcessedData):
         model = IV2SLS(df[outcome], df[exog_cols], df[['classize']], df[['p_size']]).fit(cov_type='unadjusted')
         return model
 
-    def _iv_models(self, df, outcome):
-        """Generate suite of IV specifications across full and discontinuity samples."""
-        full = self._prep_iv_df(df)
-        disc = self._prep_iv_df(df.query(self.DISC_QUERY).copy())
+    def _iv_models(self, df, outcome, threshold=40):
+        """Generate suite of IV specifications across full/discontinuity samples."""
+        disc_query = self._discontinuity_query_for_threshold(threshold)
+        full = self._prep_iv_df(df, threshold)
+        disc = self._prep_iv_df(df.query(disc_query).copy(), threshold)
         return [
             self._run_iv(full, outcome, ['tipuach']),
             self._run_iv(full, outcome, ['tipuach', 'c_size']),
@@ -443,14 +493,33 @@ class TableGenerator(ProcessedData):
             self._run_iv(disc, outcome, ['tipuach', 'c_size']),
         ]
 
-    def build_twoSLS_grid(self):
-        """Build grid for 2SLS table across outcomes and specifications."""
+    def _iv_models_piecewise(self, df, outcome, threshold=40):
+        """Generate IV specifications replacing enrollment trends with piecewise-linear trend.
+
+        This mirrors `_iv_models` but uses `plin` (piecewise linear trend) in place of
+        linear enrollment controls where applicable.
+        """
+        disc_query = self._discontinuity_query_for_threshold(threshold)
+        full = self._prep_iv_df(df, threshold)
+        disc = self._prep_iv_df(df.query(disc_query).copy(), threshold)
+        return [
+            self._run_iv(full, outcome, ['tipuach']),
+            self._run_iv(full, outcome, ['tipuach', 'plin']),
+            self._run_iv(full, outcome, ['tipuach', 'plin', 'c_size_sq100']),
+            self._run_iv(full, outcome, ['plin']),
+            self._run_iv(disc, outcome, ['tipuach']),
+            self._run_iv(disc, outcome, ['tipuach', 'plin']),
+        ]
+
+    def build_twoSLS_grid(self, threshold=40):
+        """Build grid for 2SLS table across outcomes/specifications for a threshold."""
         cols = [f'({i})' for i in range(1, 13)]
-        verb_models = self._iv_models(self.df, 'avgverb')
-        math_models = self._iv_models(self.df, 'avgmath')
+        verb_models = self._iv_models(self.df, 'avgverb', threshold)
+        math_models = self._iv_models(self.df, 'avgmath', threshold)
         all_models = dict(zip(cols, verb_models + math_models))
 
-        disc_df = self.df.query(self.DISC_QUERY)
+        disc_query = self._discontinuity_query_for_threshold(threshold)
+        disc_df = self.df.query(disc_query)
 
         rows = [
             'Mean score', '(s.d.)', 'Regressors',
@@ -503,12 +572,12 @@ class TableGenerator(ProcessedData):
 
         return grid
 
-    def format_twoSLS_table(self, grid):
+    def format_twoSLS_table(self, grid, threshold=40):
         """Format 2SLS grid as GT object."""
         grade = self.grade
         return (
             GT(grid.reset_index().rename(columns={'index': 'Regressors'}))
-            .tab_header(title=f'2SLS ESTIMATES FOR 1991 ({grade}TH GRADERS)')
+            .tab_header(title=f'2SLS ESTIMATES FOR 1991 ({grade}TH GRADERS, THRESHOLD={threshold})')
             .tab_spanner(label='Reading comprehension', columns=[f'({i})' for i in range(1, 7)])
             .tab_spanner(label='Math',                  columns=[f'({i})' for i in range(7, 13)])
             .tab_spanner(label='Full sample',           columns=[f'({i})' for i in range(1, 5)],  id='full_verb')
@@ -528,10 +597,98 @@ class TableGenerator(ProcessedData):
             )
         )
 
-    def custom_twoSLS_table(self):
-        """Generate formatted 2SLS table for publication."""
-        grid = self.build_twoSLS_grid()
-        return self.format_twoSLS_table(grid)
+    def custom_twoSLS_table(self, threshold=40):
+        """Generate formatted 2SLS table for publication with configurable threshold."""
+        grid = self.build_twoSLS_grid(threshold=threshold)
+        return self.format_twoSLS_table(grid, threshold=threshold)
+
+    def build_twoSLS_grid_piecewise(self, threshold=40):
+        """Build grid for 2SLS table using piecewise-linear trend specifications."""
+        cols = [f'({i})' for i in range(1, 13)]
+        verb_models = self._iv_models_piecewise(self.df, 'avgverb', threshold)
+        math_models = self._iv_models_piecewise(self.df, 'avgmath', threshold)
+        all_models = dict(zip(cols, verb_models + math_models))
+
+        disc_query = self._discontinuity_query_for_threshold(threshold)
+        disc_df = self.df.query(disc_query)
+
+        rows = [
+            'Mean score', '(s.d.)', 'Regressors',
+            'Class size', '',
+            'Percent disadvantaged', ' ',
+            'Enrollment', '  ',
+            'Enrollment squared/100', '   ',
+            'Piecewise linear trend', '    ',
+            'Root MSE', 'N',
+        ]
+        grid = pd.DataFrame('', index=rows, columns=cols)
+
+        block_stats = [
+            (self.df['avgverb'],  '(2)'),
+            (disc_df['avgverb'],  '(5)'),
+            (self.df['avgmath'],  '(9)'),
+            (disc_df['avgmath'],  '(11)'),
+        ]
+        for series, display_col in block_stats:
+            grid.at['Mean score', display_col] = f'{series.mean():.1f}'
+            grid.at['(s.d.)', display_col] = f'({series.std():.1f})'
+
+        param_map = {
+            'classize':      ('Class size',              ''),
+            'tipuach':       ('Percent disadvantaged',   ' '),
+            'c_size':        ('Enrollment',              '  '),
+            'c_size_sq100':  ('Enrollment squared/100',  '   '),
+            'plin':          ('Piecewise linear trend',  '    '),
+        }
+        for col, res in all_models.items():
+            params = res.params
+            std_errors = res.std_errors
+            for var, (row_coef, row_se) in param_map.items():
+                if var in params.index:
+                    grid.at[row_coef, col] = self._fmt_coef(params[var])
+                    grid.at[row_se,   col] = self._fmt_se(std_errors[var])
+            grid.at['Root MSE', col] = f'{np.sqrt(float(res.resids.T @ res.resids) / res.df_resid):.2f}'
+
+        n_block = [
+            (verb_models[1], '(2)'),
+            (verb_models[4], '(5)'),
+            (math_models[1], '(9)'),
+            (math_models[4], '(11)'),
+        ]
+        for res, display_col in n_block:
+            grid.at['N', display_col] = f'{int(res.nobs):,}'
+
+        return grid
+
+    def format_twoSLS_table_piecewise(self, grid, threshold=40):
+        """Format piecewise-trend 2SLS grid as GT object."""
+        grade = self.grade
+        return (
+            GT(grid.reset_index().rename(columns={'index': 'Regressors'}))
+            .tab_header(title=f'2SLS ESTIMATES FOR 1991 ({grade}TH GRADERS, PIECEWISE TREND, THRESHOLD={threshold})')
+            .tab_spanner(label='Reading comprehension', columns=[f'({i})' for i in range(1, 7)])
+            .tab_spanner(label='Math',                  columns=[f'({i})' for i in range(7, 13)])
+            .tab_spanner(label='Full sample',           columns=[f'({i})' for i in range(1, 5)],  id='full_verb_pw')
+            .tab_spanner(label='+/- 5 Discontinuity sample', columns=['(5)', '(6)'],              id='disc_verb_pw')
+            .tab_spanner(label='Full sample',           columns=[f'({i})' for i in range(7, 11)], id='full_math_pw')
+            .tab_spanner(label='+/- 5 Discontinuity sample', columns=['(11)', '(12)'],             id='disc_math_pw')
+            .cols_label(Regressors='')
+            .cols_align(align='left',   columns='Regressors')
+            .cols_align(align='center', columns=[f'({i})' for i in range(1, 13)])
+            .tab_style(style=style.text(style='italic'), locations=loc.body(rows=[0, 1, 2]))
+            .tab_style(style=style.css('padding-left: 20px'), locations=loc.body(rows=[3, 5, 7, 9, 11]))
+            .tab_options(
+                table_border_top_style='double',
+                table_border_bottom_style='double',
+                heading_border_bottom_style='solid',
+                heading_border_bottom_width='2px',
+            )
+        )
+
+    def custom_twoSLS_table_piecewise(self, threshold=40):
+        """Generate formatted piecewise-trend 2SLS table for publication."""
+        grid = self.build_twoSLS_grid_piecewise(threshold=threshold)
+        return self.format_twoSLS_table_piecewise(grid, threshold=threshold)
 
     # ========== Dummy-Instrument Table ==========
 
@@ -792,20 +949,33 @@ class TableGenerator(ProcessedData):
 
 
     @staticmethod
-    def _piecewise_linear_trend(enrollment):
-        """Piecewise-linear trend used in the IV specification."""
+    def _piecewise_linear_trend(enrollment, threshold=40):
+        """Continuous piecewise trend matching Maimonides-rule slopes for a threshold."""
         e = pd.Series(enrollment, copy=False)
         trend = pd.Series(np.nan, index=e.index, dtype=float)
+        if e.empty:
+            return trend
 
-        m1 = (e >= 0) & (e <= 40)
-        m2 = (e >= 41) & (e <= 80)
-        m3 = (e >= 81) & (e <= 120)
-        m4 = (e >= 121) & (e <= 160)
+        max_e = int(np.nanmax(e.values))
+        n_segments = max(1, int(np.ceil(max_e / threshold)))
+        intercept = 0.0
 
-        trend.loc[m1] = e.loc[m1]
-        trend.loc[m2] = 20 + (e.loc[m2] / 2)
-        trend.loc[m3] = (100 / 3) + (e.loc[m3] / 3)
-        trend.loc[m4] = (130 / 3) + (e.loc[m4] / 4)
+        for j in range(1, n_segments + 1):
+            left = (j - 1) * threshold
+            right = j * threshold
+            if j == 1:
+                mask = (e >= 0) & (e <= right)
+            else:
+                mask = (e > left) & (e <= right)
+
+            trend.loc[mask] = intercept + (e.loc[mask] / j)
+            boundary_value = intercept + (right / j)
+            intercept = boundary_value - (right / (j + 1))
+
+        over_mask = e > (n_segments * threshold)
+        if over_mask.any():
+            trend.loc[over_mask] = intercept + (e.loc[over_mask] / (n_segments + 1))
+
         return trend
 
     def __init__(self, df):
@@ -1167,11 +1337,12 @@ class TableGenerator(ProcessedData):
     # 2SLS table
     # ------------------------------------------------------------------
 
-    def _prep_iv_df(self, df):
+    def _prep_iv_df(self, df, threshold=40):
         df = df.copy()
+        df['p_size'] = self._maimonides_rule_threshold(df['c_size'], threshold)
         df['c_size_sq100'] = df['c_size'] ** 2 / 100
-        df['seg'] = np.floor((df['c_size'] - 1) / 40).astype(int)
-        df['plin'] = self._piecewise_linear_trend(df['c_size'])
+        df['seg'] = np.floor((df['c_size'] - 1) / threshold).astype(int)
+        df['plin'] = self._piecewise_linear_trend(df['c_size'], threshold)
         return df
 
     def _run_iv(self, df, outcome, exog_vars):
@@ -1190,14 +1361,10 @@ class TableGenerator(ProcessedData):
         model = IV2SLS(df[outcome], df[exog_cols], df[['classize']], df[['p_size']]).fit(cov_type='unadjusted')
         return model
 
-    def _iv_models(self, df, outcome):
-        disc_query = (
-            "(c_size >= 36 & c_size <= 45) | "
-            "(c_size >= 76 & c_size <= 85) | "
-            "(c_size >= 116 & c_size <= 125)"
-        )
-        full = self._prep_iv_df(df)
-        disc = self._prep_iv_df(df.query(disc_query).copy())
+    def _iv_models(self, df, outcome, threshold=40):
+        disc_query = self._discontinuity_query_for_threshold(threshold)
+        full = self._prep_iv_df(df, threshold)
+        disc = self._prep_iv_df(df.query(disc_query).copy(), threshold)
         return [
             self._run_iv(full, outcome, ['tipuach']),
             self._run_iv(full, outcome, ['tipuach', 'c_size']),
@@ -1207,18 +1374,14 @@ class TableGenerator(ProcessedData):
             self._run_iv(disc, outcome, ['tipuach', 'c_size']),
         ]
 
-    def build_twoSLS_grid(self):
+    def build_twoSLS_grid(self, threshold=40):
         cols = [f'({i})' for i in range(1, 13)]
 
-        verb_models = self._iv_models(self.df, 'avgverb')
-        math_models = self._iv_models(self.df, 'avgmath')
+        verb_models = self._iv_models(self.df, 'avgverb', threshold)
+        math_models = self._iv_models(self.df, 'avgmath', threshold)
         all_models = dict(zip(cols, verb_models + math_models))
 
-        disc_query = (
-            "(c_size >= 36 & c_size <= 45) | "
-            "(c_size >= 76 & c_size <= 85) | "
-            "(c_size >= 116 & c_size <= 125)"
-        )
+        disc_query = self._discontinuity_query_for_threshold(threshold)
         disc_df = self.df.query(disc_query)
 
         rows = [
@@ -1273,11 +1436,11 @@ class TableGenerator(ProcessedData):
 
         return grid
 
-    def format_twoSLS_table(self, grid):
+    def format_twoSLS_table(self, grid, threshold=40):
         grade = self.grade
         return (
             GT(grid.reset_index().rename(columns={'index': 'Regressors'}))
-            .tab_header(title=f'2SLS ESTIMATES FOR 1991 ({grade}TH GRADERS)')
+            .tab_header(title=f'2SLS ESTIMATES FOR 1991 ({grade}TH GRADERS, THRESHOLD={threshold})')
             .tab_spanner(label='Reading comprehension', columns=[f'({i})' for i in range(1, 7)])
             .tab_spanner(label='Math',                  columns=[f'({i})' for i in range(7, 13)])
             .tab_spanner(label='Full sample',           columns=[f'({i})' for i in range(1, 5)],  id='full_verb')
@@ -1297,9 +1460,9 @@ class TableGenerator(ProcessedData):
             )
         )
 
-    def custom_twoSLS_table(self):
-        grid = self.build_twoSLS_grid()
-        return self.format_twoSLS_table(grid)
+    def custom_twoSLS_table(self, threshold=40):
+        grid = self.build_twoSLS_grid(threshold=threshold)
+        return self.format_twoSLS_table(grid, threshold=threshold)
 
     # ------------------------------------------------------------------
     # Dummy-instrument table
